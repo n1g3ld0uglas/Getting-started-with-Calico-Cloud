@@ -54,19 +54,19 @@ kubectl get pod -n storefront --show-labels
 Run the following command to start a rogue workload to simulate a malicious actor probing for vulnerable or exposed services within the cluster:
 
 ```
-kubectl apply -f https://installer.calicocloud.io/rogue-demo.yaml
+kubectl apply -f https://installer.calicocloud.io/rogue-demo.yaml -n storefront
 ```
 
 To confirm your rogue pod was successfully deployed to the 'default' namespace, run the below command:
 
 ```
-kubectl get pods -n default
+kubectl get pods -n storefront
 ```
 
 After you are done evaluating your network policies in with the rogue pod, you can remove it by running:
 
 ```
-kubectl delete -f https://installer.calicocloud.io/rogue-demo.yaml
+kubectl delete -f https://installer.calicocloud.io/rogue-demo.yaml -n storefront
 ```
 
 # Creating a zone-based architecture:
@@ -298,51 +298,36 @@ https://feodotracker.abuse.ch/downloads/ipblocklist.txt
 
 You should not get connectivity, and the pings will show up as denied traffic in the flow logs.
 
-# PCI Whitelist
-
-This policy ensures that only pods with PCI-labeled service accounts can talk to each other. 
-For traffic that does not involve a PCI-labeled service account, we use the Pass action to “pass” this traffic to the next tier of Calico network policies
+# Quarantining the rogue pod
+Traditionally, when we block a network packet we lose all context of the threat actor.
+Calico Network Policies allow you to block AND log the activity, therefore tracking the rich metadata surrounding the malicious actor.
 
 ```
-cat << EOF > pci-whitelist.yaml
+cat << EOF > quarantine.yaml
 apiVersion: projectcalico.org/v3
 kind: GlobalNetworkPolicy
 metadata:
-  name: security.pci-whitelist
+  name: security.quarantine
 spec:
   tier: security
-  order: 255
-  selector: ''
+  order: 100
+  selector: quarantine == "true"
   namespaceSelector: ''
-  serviceAccountSelector: PCI == "true"
+  serviceAccountSelector: ''
   ingress:
+    - action: Log
+      source: {}
+      destination: {}
     - action: Deny
-      source:
-        serviceAccounts:
-          names: []
-          selector: PCI != "true"
-      destination:
-        serviceAccounts:
-          names: []
-          selector: PCI == "true"
+      source: {}
+      destination: {}
   egress:
-    - action: Pass
+    - action: Log
       source: {}
-      destination:
-        selector: k8s-app == "kube-dns"||has(dns.operator.openshift.io/daemonset-dns)
-    - action: Pass
-      source: {}
-      destination:
-        selector: type == "public"
+      destination: {}
     - action: Deny
-      source:
-        serviceAccounts:
-          names: []
-          selector: PCI == "true"
-      destination:
-        serviceAccounts:
-          names: []
-          selector: PCI != "true"
+      source: {}
+      destination: {}
   doNotTrack: false
   applyOnForward: false
   preDNAT: false
@@ -353,38 +338,124 @@ EOF
 ```
 
 ```
-kubectl apply -f pci-whitelist.yaml
+kubectl apply -f quarantine.yaml
+```
+
+Add the quarantine label to our rogue pod, and monitor changes to the quarantine policy.
+```
+kubectl label pod attacker-app-5f8d5574bf-4ljvx -n storefront quarantine=true
+```
+
+It's always good practice to double-check your label is correctly applied
+```
+kubectl get pod attacker-app-5f8d5574bf-4ljvx -n storefront --show-labels
+```
+
+# Pass Traffic to the Default Tier?
+
+Tiers are evaluated from left to right, and network policies within tiers are evaluated from top to bottom. This effectively means that a network policy in the Security tier needs to evaluate and pass traffic before any policy below it or to the right can see that same traffic.
+
+```
+cat << EOF > security-pass.yaml
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: security.pass
+spec:
+  tier: security
+  order: 300
+  selector: ''
+  namespaceSelector: ''
+  serviceAccountSelector: ''
+  ingress:
+    - action: Pass
+      source: {}
+      destination: {}
+  egress:
+    - action: Pass
+      source: {}
+      destination: {}
+  doNotTrack: false
+  applyOnForward: false
+  preDNAT: false
+  types:
+    - Ingress
+    - Egress
+EOF
+```
+
+```
+kubectl apply -f security-pass.yaml
+```
+
+# Finally, you need a Default/Deny Policy
+
+We recommend creating an implicit default deny policy for your Kubernetes pods, regardless if you use Calico Cloud or Kubernetes network policy. 
+This ensures that unwanted traffic is denied by default. Note that implicit default deny policy always occurs last; if any other policy allows the traffic, then the deny does not come into effect. The deny is executed only after all other policies are evaluated.
+https://docs.tigera.io/security/kubernetes-default-deny#default-denyallow-behavior
+
+```
+cat << EOF > default-deny.yaml
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  selector: all()
+  types:
+  - Ingress
+  - Egress
+EOF
+```
+
+```
+kubectl apply -f default-deny.yaml
 ```
 
 # Compliance Reporting
-In this section we will walk through a quick example of how to use Calico Enterprise to produce dynamic compliance
-reports that allow you to assess the state of compliance that is in lock step with your CI/CD pipeline
+
+Ensure that the compliance-benchmarker is running, and that the cis-benchmark report type is installed:
+
+```
+kubectl get -n tigera-compliance daemonset compliance-benchmarker
+kubectl get globalreporttype cis-benchmark
+```
+
+
+In this section we will walk through a quick example of how to use Calico Cloud to produce dynamic compliance
+reports that allow you to assess the state of compliance that is in lock step with your CI/CD pipeline.
 
 ```
 cat << EOF > daily-cis-results.yaml
 apiVersion: projectcalico.org/v3
 kind: GlobalReport
 metadata:
- name: daily-cis-results
- labels:
- deployment: production
+  name: daily-cis-results
+  labels:
+    deployment: production
 spec:
- reportType: cis-benchmark
- schedule: 0 * * * *
- cis:
- highThreshold: 100
- medThreshold: 50
- includeUnscoredTests: true
- numFailedTests: 5
- resultsFilters:
- - benchmarkSelection: { kubernetesVersion: “1.15” }
- exclude: [“1.1.4”, “1.2.5”]
- EOF
- ```
+  reportType: cis-benchmark
+  schedule: 0 * * * *
+  cis:
+    highThreshold: 100
+    medThreshold: 50
+    includeUnscoredTests: true
+    numFailedTests: 5
+    resultsFilters:
+    - benchmarkSelection: { kubernetesVersion: "1.13" }
+      exclude: ["1.1.4", "1.2.5"]
+EOF
+```
  
- ```
+```
 kubectl apply -f daily-cis-results.yaml
 ```
  
 CIS benchmarks are best practices for the secure configuration of a target system - in our case Kubnernetes. 
 Calico Cloud supports a number of GlobalReport types that can be used for continuous compliance, and CIS benchmarks is one of them.
+
+To view the status of a report, you must use the kubectl command. For example:
+
+```
+kubectl get globalreports.projectcalico.org daily-cis-results -o yaml
+```
