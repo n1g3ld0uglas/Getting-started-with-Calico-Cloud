@@ -57,10 +57,132 @@ Run the following command to start a rogue workload to simulate a malicious acto
 kubectl apply -f https://installer.calicocloud.io/rogue-demo.yaml
 ```
 
+To confirm your rogue pod was successfully deployed to the 'default' namespace, run the below command:
+
+```
+kubectl get pods -n default
+```
+
 After you are done evaluating your network policies in with the rogue pod, you can remove it by running:
 
 ```
 kubectl delete -f https://installer.calicocloud.io/rogue-demo.yaml
+```
+
+# Creating a zone-based architecture:
+One of the most widely adopted deployment models with traditional firewalls is using a zone-based architecture. This
+involves putting the frontend of an application in a DMZ, business logic services in Trusted zone, and our backend data
+store in Restricted - all with controls on how zones can communicate with each other. For our storefront application, it
+would look something like the following:
+
+
+# Start with a Demilitarized Zone (DMZ):
+The goal of a DMZ is to add an extra layer of security to an organization's local area network. 
+A protected and monitored network node that faces outside the internal network can access what is exposed in the DMZ, while the rest of the organization's network is safe behind a firewall.
+
+```
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: default.dmz
+  namespace: storefront
+spec:
+  tier: default
+  order: 0
+  selector: fw-zone == "dmz"
+  serviceAccountSelector: ''
+  ingress:
+    - action: Allow
+      source:
+        selector: type == "public"
+      destination: {}
+    - action: Deny
+      source: {}
+      destination: {}
+  egress:
+    - action: Allow
+      source: {}
+      destination:
+        selector: fw-zone == "trusted"||app == "logging"
+    - action: Deny
+      source: {}
+      destination: {}
+  types:
+    - Ingress
+    - Egress
+```
+
+# After the DMZ, we need a Trusted Zone
+The trusted zone represents a group of network addresses from which the Personal firewall allows some inbound traffic using default settings.
+
+```
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: default.trusted
+  namespace: storefront
+spec:
+  tier: default
+  order: 10
+  selector: fw-zone == "trusted"
+  serviceAccountSelector: ''
+  ingress:
+    - action: Allow
+      source:
+        selector: fw-zone == "dmz"
+      destination: {}
+    - action: Allow
+      source:
+        selector: fw-zone == "trusted"
+      destination: {}
+    - action: Deny
+      source: {}
+      destination: {}
+  egress:
+    - action: Allow
+      source: {}
+      destination:
+        selector: fw-zone == "restricted"
+    - action: Deny
+      source: {}
+      destination: {}
+  types:
+    - Ingress
+    - Egress
+```
+# Finally, we configure the Restricted Zone
+A restricted zone supports functions to which access must be strictly controlled; direct access from an uncontrolled network should not be permitted. In a large enterprise, several network zones might be designated as restricted.
+
+```
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: default.restricted
+  namespace: storefront
+spec:
+  tier: default
+  order: 20
+  selector: fw-zone == "restricted"
+  serviceAccountSelector: ''
+  ingress:
+    - action: Allow
+      source:
+        selector: fw-zone == "trusted"
+      destination: {}
+    - action: Allow
+      source:
+        selector: fw-zone == "restricted"
+      destination: {}
+    - action: Deny
+      source: {}
+      destination: {}
+  egress:
+    - action: Allow
+      source: {}
+      destination: {}
+  types:
+    - Ingress
+    - Egress
 ```
 
 # Subscribing to a malicious threatfeed
@@ -143,3 +265,34 @@ Apply this policy to the cluster
 ```
 kubectl apply -f block-feodo.yaml
 ```
+
+# Verify policy on test workload
+We will verify the policy from the test workload that we created earlier.
+Exec into a pod 
+
+```
+kubectl apply -f https://k8s.io/examples/application/shell-demo.yaml
+```
+
+Get a shell to the running pod
+
+```
+kubectl exec --stdin --tty shell-demo -- /bin/bash
+```
+
+Install the ping utility:
+
+```
+apt update && apt install iputils-ping
+```
+
+Ping a known safe IP (like 8.8.8.8, Google’s public DNS server)
+
+```
+ping 8.8.8.8
+```
+
+Open the FEODO tracker list and choose an IP on the list to ping.
+https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+
+You should not get connectivity, and the pings will show up as denied traffic in the flow logs.
