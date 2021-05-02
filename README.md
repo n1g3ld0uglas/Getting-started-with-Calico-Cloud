@@ -81,6 +81,7 @@ The goal of a DMZ is to add an extra layer of security to an organization's loca
 A protected and monitored network node that faces outside the internal network can access what is exposed in the DMZ, while the rest of the organization's network is safe behind a firewall.
 
 ```
+cat << EOF > dmz.yaml
 apiVersion: projectcalico.org/v3
 kind: NetworkPolicy
 metadata:
@@ -110,12 +111,18 @@ spec:
   types:
     - Ingress
     - Egress
+EOF
+```
+
+```
+kubectl apply -f dmz.yaml
 ```
 
 # After the DMZ, we need a Trusted Zone
 The trusted zone represents a group of network addresses from which the Personal firewall allows some inbound traffic using default settings.
 
 ```
+cat << EOF > trusted.yaml
 apiVersion: projectcalico.org/v3
 kind: NetworkPolicy
 metadata:
@@ -149,11 +156,18 @@ spec:
   types:
     - Ingress
     - Egress
+EOF
 ```
+
+```
+kubectl apply -f trusted.yaml
+```
+
 # Finally, we configure the Restricted Zone
 A restricted zone supports functions to which access must be strictly controlled; direct access from an uncontrolled network should not be permitted. In a large enterprise, several network zones might be designated as restricted.
 
 ```
+cat << EOF > restricted.yaml
 apiVersion: projectcalico.org/v3
 kind: NetworkPolicy
 metadata:
@@ -183,6 +197,11 @@ spec:
   types:
     - Ingress
     - Egress
+EOF
+```
+
+```
+kubectl apply -f restricted.yaml
 ```
 
 # Subscribing to a malicious threatfeed
@@ -191,6 +210,7 @@ A network set resource represents an arbitrary set of IP subnetworks/CIDRs, allo
 Network sets are useful for applying policy to traffic coming from (or going to) external, non-Calico, networks.
 
 ```
+cat << EOF > threat-feed.yaml
 apiVersion: projectcalico.org/v3
 kind: GlobalThreatFeed
 metadata:
@@ -200,12 +220,13 @@ spec:
   pull:
     http:
       url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+EOF
 ```
 
 As always, don't forget to add the feed to your cluster.
 
 ```
-kubectl apply -f feodo-tracker.yaml
+kubectl apply -f threat-feed.yaml
 ```
 
 This pulls updates using the default period of once per day. 
@@ -218,6 +239,7 @@ We will start by creating a tier called 'security'.
 Notice how the below 'block-fedo' policy is related to the 'security' tier - name: security.block-feodo
 
 ```
+cat << EOF > feodo-policy.yaml
 apiVersion: projectcalico.org/v3
 kind: GlobalNetworkPolicy
 metadata:
@@ -238,32 +260,11 @@ spec:
   preDNAT: false
   types:
     - Egress
-```
-# Test the threat feed for yourself
-We will now apply a GlobalNetworkPolicy that blocks the test workload from connecting to any IPs in the threat feed.
-Create a file called 'block-feodo.yaml' with the following contents:
-
-```
-apiVersion: projectcalico.org/v3
-kind: GlobalNetworkPolicy
-metadata:
-  name: default.block-feodo
-spec:
-  tier: default
-  selector: docs.tigera.io/tutorial == 'threat-feed'
-  types:
-  - Egress
-  egress:
-  - action: Deny
-    destination:
-      selector: docs.tigera.io/threat/feed == 'feodo'
-  - action: Allow
+EOF
 ```
 
-Apply this policy to the cluster
-
 ```
-kubectl apply -f block-feodo.yaml
+kubectl apply -f feodo-policy.yaml
 ```
 
 # Verify policy on test workload
@@ -296,3 +297,94 @@ Open the FEODO tracker list and choose an IP on the list to ping.
 https://feodotracker.abuse.ch/downloads/ipblocklist.txt
 
 You should not get connectivity, and the pings will show up as denied traffic in the flow logs.
+
+# PCI Whitelist
+
+This policy ensures that only pods with PCI-labeled service accounts can talk to each other. 
+For traffic that does not involve a PCI-labeled service account, we use the Pass action to “pass” this traffic to the next tier of Calico network policies
+
+```
+cat << EOF > pci-whitelist.yaml
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: security.pci-whitelist
+spec:
+  tier: security
+  order: 255
+  selector: ''
+  namespaceSelector: ''
+  serviceAccountSelector: PCI == "true"
+  ingress:
+    - action: Deny
+      source:
+        serviceAccounts:
+          names: []
+          selector: PCI != "true"
+      destination:
+        serviceAccounts:
+          names: []
+          selector: PCI == "true"
+  egress:
+    - action: Pass
+      source: {}
+      destination:
+        selector: k8s-app == "kube-dns"||has(dns.operator.openshift.io/daemonset-dns)
+    - action: Pass
+      source: {}
+      destination:
+        selector: type == "public"
+    - action: Deny
+      source:
+        serviceAccounts:
+          names: []
+          selector: PCI == "true"
+      destination:
+        serviceAccounts:
+          names: []
+          selector: PCI != "true"
+  doNotTrack: false
+  applyOnForward: false
+  preDNAT: false
+  types:
+    - Ingress
+    - Egress
+EOF
+```
+
+```
+kubectl apply -f pci-whitelist.yaml
+```
+
+# Compliance Reporting
+In this section we will walk through a quick example of how to use Calico Enterprise to produce dynamic compliance
+reports that allow you to assess the state of compliance that is in lock step with your CI/CD pipeline
+
+```
+cat << EOF > daily-cis-results.yaml
+apiVersion: projectcalico.org/v3
+kind: GlobalReport
+metadata:
+ name: daily-cis-results
+ labels:
+ deployment: production
+spec:
+ reportType: cis-benchmark
+ schedule: 0 * * * *
+ cis:
+ highThreshold: 100
+ medThreshold: 50
+ includeUnscoredTests: true
+ numFailedTests: 5
+ resultsFilters:
+ - benchmarkSelection: { kubernetesVersion: “1.15” }
+ exclude: [“1.1.4”, “1.2.5”]
+ EOF
+ ```
+ 
+ ```
+kubectl apply -f daily-cis-results.yaml
+```
+ 
+CIS benchmarks are best practices for the secure configuration of a target system - in our case Kubnernetes. 
+Calico Cloud supports a number of GlobalReport types that can be used for continuous compliance, and CIS benchmarks is one of them.
