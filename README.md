@@ -252,7 +252,7 @@ spec:
       url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
   globalNetworkSet:
     labels:
-      docs.tigera.io/threat/feed: feodo
+      threat-feed: feodo
 EOF
 ```
 
