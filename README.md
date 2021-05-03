@@ -1,13 +1,21 @@
 # Getting started with Calico Cloud
 This quickstart guide for Calico Network Policy and Security options for Kubernetes clusters is just an extension of Tigera's documentation for their Software-as-a-Service offering 'Calico Cloud' - https://docs.calicocloud.io/get-started/quickstart
 
-This guide also assumes that you have already created a supported Kubernetes cluster, have installed Project Calico on the master node, and have started a trial of Project Calico.
+This guide also assumes that you have already created a supported Kubernetes cluster, have installed Project Calico installed on the master node, and have started a trial of Calico Cloud.
 
-At the time of writing this post, you can easily hook-up your existing cluster to Calico Cloud by running the cURL command provided to you by the team at Tigera. 
-The command should look similar to the below example:
+At the time of writing this post, you can easily hook-up your existing cluster to Calico Cloud by running a single cURL command provided to you by the team at Tigera. The command should look similar to the below example:
 
 ```
 curl -s https://installer.calicocloud.io/XYZ_your_business_install.sh | bash
+```
+
+# Modify the Felix agent log flush interval
+Should help us see data update quicker during our workshop. This is not a recommended configuration for production environments.
+
+```
+kubectl patch felixconfiguration.p default -p '{"spec":{"flowLogsFlushInterval":"10s"}}'
+kubectl patch felixconfiguration.p default -p '{"spec":{"dnsLogsFlushInterval":"10s"}}'
+kubectl patch felixconfiguration.p default -p '{"spec":{"flowLogsFileAggregationKindForAllowed":1}}'
 ```
 
 # Deploying a Rogue Pod for instant threat visibility
@@ -34,7 +42,7 @@ kubectl apply -f https://installer.calicocloud.io/rogue-demo.yaml -n storefront
 To confirm your rogue pod was successfully deployed to the 'default' namespace, run the below command:
 
 ```
-kubectl get pods -n storefront
+kubectl get pods -n storefront --show-labels
 ```
 
 After you are done evaluating your network policies in with the rogue pod, you can remove it by running:
@@ -210,6 +218,11 @@ https://docs.tigera.io/reference/resources/globalthreatfeed
 
 # Block pods from contacting IPs
 
+Start by creating a generic 'shellpods' namespace.
+```
+kubectl create namespace shellpods
+```
+
 In this demo, we will apply the policy only to a test workload (so we do not impact other traffic).
 Create a file called tf-ubuntu.yaml with the following contents:
 
@@ -234,7 +247,7 @@ EOF
 ```
 
 ```
-kubectl apply -f tf-ubuntu.yaml
+kubectl apply -f tf-ubuntu.yaml -n shellpods
 ```
 
 Edit the feodo-tracker.yaml to include a globalNetworkSet stanza:
@@ -269,7 +282,7 @@ kubectl get globalnetworksets threatfeed.feodo-tracker -o yaml
 # Build a policy based on the threat feed
 
 We will start by creating a tier called 'security'.
-Notice how the below 'block-fedo' policy is related to the 'security' tier - name: security.block-feodo
+Notice how the below 'block-feodo' policy is related to the 'security' tier - name: security.block-feodo
 
 ```
 cat << EOF > feodo-policy.yaml
@@ -302,16 +315,17 @@ kubectl apply -f feodo-policy.yaml
 
 # Verify policy on test workload
 We will verify the policy from the test workload that we created earlier.
-Exec into a pod 
+
+Create pod with a standard app template within the 'shellpods' namespace
 
 ```
-kubectl apply -f https://k8s.io/examples/application/shell-demo.yaml
+kubectl apply -f https://k8s.io/examples/application/shell-demo.yaml -n shellpods
 ```
 
-Get a shell to the running pod
+Exex into the running pod. This allows us to test the allowed/blocked IP addresses:
 
 ```
-kubectl exec --stdin --tty shell-demo -- /bin/bash
+kubectl exec --stdin --tty shell-demo -n shellpods -- /bin/bash
 ```
 
 Install the ping utility:
