@@ -182,9 +182,10 @@ kubectl apply -f restricted.yaml
 Project Calico simplifies the process of dynamic threat feed subscription via a Calico construct known as 'NetworkSets'.
 A network set resource represents an arbitrary set of IP subnetworks/CIDRs, allowing it to be matched by Calico policy. 
 Network sets are useful for applying policy to traffic coming from (or going to) external, non-Calico, networks.
+https://docs.tigera.io/threat/suspicious-ips
 
 ```
-cat << EOF > threat-feed.yaml
+cat << EOF > feodo-tracker.yaml
 apiVersion: projectcalico.org/v3
 kind: GlobalThreatFeed
 metadata:
@@ -200,12 +201,70 @@ EOF
 As always, don't forget to add the feed to your cluster.
 
 ```
-kubectl apply -f threat-feed.yaml
+kubectl apply -f feodo-tracker.yaml.yaml
 ```
 
 This pulls updates using the default period of once per day. 
 See the Global Resource Threat Feed API for all configuration options:
 https://docs.tigera.io/reference/resources/globalthreatfeed
+
+# Block pods from contacting IPs
+
+In this demo, we will apply the policy only to a test workload (so we do not impact other traffic).
+Create a file called tf-ubuntu.yaml with the following contents:
+
+```
+cat << EOF > tf-ubuntu.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    docs.tigera.io/tutorial: threat-feed
+  name: tf-ubuntu
+spec:
+  nodeSelector:
+    kubernetes.io/os: linux
+  containers:
+  - command:
+    - sleep
+    - "3600"
+    image: ubuntu
+    name: test
+EOF
+```
+
+```
+kubectl apply -f tf-ubuntu.yaml
+```
+
+Edit the feodo-tracker.yaml to include a globalNetworkSet stanza:
+
+```
+cat << EOF > feodo-tracker.yaml
+apiVersion: projectcalico.org/v3
+kind: GlobalThreatFeed
+metadata:
+  name: feodo-tracker
+spec:
+  content: IPSet
+  pull:
+    http:
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+  globalNetworkSet:
+    labels:
+      docs.tigera.io/threat/feed: feodo
+EOF
+```
+
+```
+kubectl apply -f feodo-tracker.yaml
+```
+
+Verify the GlobalNetworkSet is configured correctly:
+
+```
+kubectl get globalnetworksets threatfeed.feodo-tracker -o yaml
+```
 
 # Build a policy based on the threat feed
 
@@ -404,6 +463,7 @@ kubectl get globalreporttype cis-benchmark
 
 In this section we will walk through a quick example of how to use Calico Cloud to produce dynamic compliance
 reports that allow you to assess the state of compliance that is in lock step with your CI/CD pipeline.
+https://docs.tigera.io/compliance/compliance-reports-cis
 
 ```
 cat << EOF > daily-cis-results.yaml
